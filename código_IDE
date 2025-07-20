@@ -1,0 +1,172 @@
+// === ARDUINO ===
+// Projeto: SAMI sistema automatizado de medicação inteligente
+// Funcionalidades:
+//   • Reconhece dois idosos (MIGUEL e ELIAS) via Serial
+//   • Horários: MIGUEL 10:01  |  ELIAS 10:02
+//   • Cada idoso libera seu compartimento (servo) se for a pessoa correta e no horário certo
+//   • HC‑SR04 verifica se há remédio; LEDs indicam CHEIO (verde) ou VAZIO (vermelho)
+//   • LCD I2C exibe hora, avisos e instruções
+
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <Servo.h>
+
+// === LCD ===
+LiquidCrystal_I2C lcd(0x27, 16, 2);   // endereço 0x27, display 16×2
+
+// === PINOS do sensor ultrassônico ===
+#define TRIG_PIN 4
+#define ECHO_PIN 5
+
+// === LEDS de status do compartimento ===
+#define LED_CHEIO 6      // Verde – compartimento cheio
+#define LED_VAZIO 7      // Vermelho – precisa repor
+
+// === SERVOS (um por compartimento) ===
+#define SERVO_MIGUEL A1
+#define SERVO_ELIAS  A2
+#define SERVO_EXTRA  A3   
+
+Servo servoMiguel;
+Servo servoElias;
+Servo servoExtra;
+
+// === RELÓGIO (contagem por millis) ===
+unsigned long prevMillis = 0;
+const unsigned long INTERVALO = 1000;   // 1 s
+int s = 0, m = 0, h = 10;               // 10:00:00 inicial
+
+// === Estrutura p/ idosos ===
+struct Idoso {
+  const char *nome;      // Nome enviado pelo Python
+  byte hora;             // Horário do alarme
+  byte minuto;
+  byte servoPin;         // Servo associado
+  bool autorizado;       // True quando o Python confirmou o rosto
+};
+
+Idoso idosos[] = {
+  {"MIGUEL", 10, 1, SERVO_MIGUEL, false},
+  {"ELIAS",  10, 2, SERVO_ELIAS,  false}
+};
+const byte QTD_IDOSOS = sizeof(idosos) / sizeof(Idoso);
+
+String bufferSerial = "";   // armazena string recebida
+
+void setup() {
+  Serial.begin(9600);
+  lcd.init();
+  lcd.backlight();
+
+  // Configura pinos do HC‑SR04
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  // LEDs
+  pinMode(LED_CHEIO, OUTPUT);
+  pinMode(LED_VAZIO, OUTPUT);
+
+  // Inicia servos
+  servoMiguel.attach(SERVO_MIGUEL);
+  servoElias.attach(SERVO_ELIAS);
+  servoExtra.attach(SERVO_EXTRA);
+  servoMiguel.write(0);
+  servoElias.write(0);
+  servoExtra.write(0);
+
+  lcd.setCursor(0, 0);
+  lcd.print("Sistema ligado");
+  delay(1500);
+  lcd.clear();
+}
+
+// ==================== LOOP PRINCIPAL ====================
+void loop() {
+  lerSerialPython();     // atualiza variáveis de autorização
+  atualizarRelogio();    // incrementa hora interna
+  exibirHoraLCD();
+  verificarCompartimento();
+  verificarAlarmes();
+}
+
+// === Lê nome enviado pelo Python ===
+void lerSerialPython() {
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n') {
+      bufferSerial.trim();
+      // reseta flags e marca autorizado quem corresponde
+      for (byte i = 0; i < QTD_IDOSOS; i++) {
+        idosos[i].autorizado = (bufferSerial == idosos[i].nome);
+      }
+      Serial.print("Recebido: "); Serial.println(bufferSerial);
+      bufferSerial = "";  // limpa p/ próxima leitura
+    } else {
+      bufferSerial += c;   // acumula caracteres
+    }
+  }
+}
+
+// === Incrementa relógio usando millis() ===
+void atualizarRelogio() {
+  if (millis() - prevMillis >= INTERVALO) {
+    prevMillis += INTERVALO;
+    if (++s >= 60) { s = 0; if (++m >= 60) { m = 0; if (++h >= 24) h = 0; } }
+  }
+}
+
+// === Exibe hora na primeira linha do LCD ===
+void exibirHoraLCD() {
+  lcd.setCursor(0, 0);
+  lcd.print("Hora: ");
+  if (h < 10) lcd.print('0'); lcd.print(h); lcd.print(':');
+  if (m < 10) lcd.print('0'); lcd.print(m);
+}
+
+// === Usa HC-SR04 para ver se precisa de reposição ===
+void verificarCompartimento() {
+  // mede distância
+  digitalWrite(TRIG_PIN, LOW); delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  long dur = pulseIn(ECHO_PIN, HIGH, 30000); // timeout 30 ms
+  float dist = dur * 0.034 / 2;
+
+  //Serial.print("dist: ");
+  //Serial.println(dist);
+
+  if (dist > 4.20 || dur == 0) {           // vazio 
+    digitalWrite(LED_CHEIO, LOW);
+    digitalWrite(LED_VAZIO, HIGH);
+    lcd.setCursor(0, 1);
+    lcd.print("Repor medicamento  ");
+  } else {                                // cheio
+    digitalWrite(LED_CHEIO, HIGH);
+    digitalWrite(LED_VAZIO, LOW);
+    lcd.setCursor(0, 1);
+    lcd.print("                    ");
+  }
+}
+
+// === Verifica se é hora de liberar para cada idoso ===
+void verificarAlarmes() {
+  for (byte i = 0; i < QTD_IDOSOS; i++) {
+    if (h == idosos[i].hora && m == idosos[i].minuto) {
+      if (idosos[i].autorizado) {
+        lcd.setCursor(0, 1);
+        lcd.print("Liberando p/ "); lcd.print(idosos[i].nome);
+
+        // aciona servo correspondente
+        Servo *srv = (idosos[i].servoPin == SERVO_MIGUEL) ? &servoMiguel : &servoElias;
+        srv->write(90);
+        delay(2000);
+        srv->write(0);
+
+        idosos[i].autorizado = false; // impede repetição dentro do mesmo minuto
+      } else {
+        lcd.setCursor(0, 1);
+        lcd.print("Pessoa incorreta  ");
+      }
+    }
+  }
+}
