@@ -1,0 +1,86 @@
+# === RECONHECIMENTO FACIAL (Python) ===
+
+import cv2
+import os
+import numpy as np
+from insightface.app import FaceAnalysis
+import serial
+import time
+
+# Inicializa o analisador facial
+app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+app.prepare(ctx_id=0, det_size=(320, 320))
+
+# Inicializa conexão com o Arduino (substitua 'COM5' pela sua porta correta)
+arduino = serial.Serial('COM5', 9600, timeout=1)
+time.sleep(2)  # Aguarda o Arduino reiniciar
+
+# Dicionário com embeddings dos rostos conhecidos
+rostos_conhecidos = {}
+
+# Carrega rostos da pasta "imagens"
+for nome_arquivo in os.listdir("imagens"):
+    caminho = os.path.join("imagens", nome_arquivo)
+    imagem = cv2.imread(caminho)
+
+    if imagem is None:
+        print(f"Erro ao carregar {nome_arquivo}")
+        continue
+
+    rostos = app.get(imagem)
+    if rostos:
+        identidade = os.path.splitext(nome_arquivo)[0].upper()
+        rostos_conhecidos[identidade] = rostos[0].embedding
+        print(f" {identidade} carregado com sucesso.")
+    else:
+        print(f" Nenhum rosto detectado em {nome_arquivo}")
+
+# Inicia webcam
+cap = cv2.VideoCapture(0)
+
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+
+if not cap.isOpened():
+    print("Erro ao acessar a câmera")
+    exit()
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    rostos_webcam = app.get(frame)
+
+    for rosto in rostos_webcam:
+        embedding_atual = rosto.embedding
+        nome_identificado = "DESCONHECIDO"
+        menor_distancia = float("inf")
+
+        for nome, embedding_ref in rostos_conhecidos.items():
+            distancia = np.linalg.norm(embedding_atual - embedding_ref)
+            if distancia < menor_distancia:
+                menor_distancia = distancia
+                nome_identificado = nome
+
+        if menor_distancia >= 19.0:
+            nome_identificado = "DESCONHECIDO"
+
+        print(f"Identificado: {nome_identificado} (Dist: {menor_distancia:.2f})")
+
+        # Envia resultado para o Arduino
+        arduino.write((nome_identificado + '\n').encode())
+        time.sleep(1)  # Aguarda processamento no Arduino
+
+        x1, y1, x2, y2 = [int(v) for v in rosto.bbox]
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(frame, f"{nome_identificado}", (x1, y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
+    cv2.imshow("Reconhecimento Facial", frame)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
+arduino.close()
